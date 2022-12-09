@@ -1,0 +1,152 @@
+---
+title: "Creating Effect Size Data"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+#Load libraries
+library(readxl)
+library(quantmod)
+library(lubridate)
+
+#Load functions
+source("Functions/imputation functions.R")  #Imputation functions
+```
+
+This MA is based on partial correlations. Following Aloe and Thompson (2013), we need the t-statistic, the df (n-p-1), and p (# of covariates) for synthesis. We have the df & p, but the t-statistic is missing for most cases. We can impute the t statistic in various ways.
+
+## Age data prep
+
+### Import and prepare data
+```{r}
+#Import and merge datasets (study-level variables with effect size data)
+dat.age <- merge(x= read_excel("Data/Final MA database for BIM projects.xlsx", sheet=3, col_names = TRUE), y = read_excel("Data/Final MA database for BIM projects.xlsx", sheet=2, col_names = TRUE), by = "Client", all = TRUE)
+
+#Drop client cases not in age-performance MA
+dat.age <- dat.age[dat.age$Client != "Domino's Pizza" ,]
+dat.age <- dat.age[dat.age$Client !=  "Bon Secours Health System Inc.",]
+
+#Reorder observations
+dat.age <- dat.age[order(dat.age$`BIM Case ID.x`),]
+
+#recode indicator variables
+#Specify range of indicator variables... starting with Age squared and going to spans of control var
+x <- 1:dim(dat.age)[2]; x <- x[names(dat.age) == "Age squared"]; x
+y <- 1:dim(dat.age)[2]; y <- y[names(dat.age) == "Spans of control"]; y
+for(i in x:y) dat.age[,i] <- ifelse(dat.age[,i]==0,1,0)  #recode variables (0-->1, 1-->0)
+
+#Create new IV type variable for workers and supervisors dichotomusly coded
+dat.age$iv_type <- dat.age$`IV Type`; dat.age$iv_type[dat.age$iv_type ==4] <- 3
+table(dat.age$iv_type)
+ifelse(dat.age$iv_type ==2, dat.age$iv_type[dat.age$iv_type==2] <- "Supervisee",ifelse(dat.age$iv_type ==3, dat.age$iv_type[dat.age$iv_type==3] <- "Supervisor",0))
+table(dat.age$iv_type)
+
+#Adjust hourly pay rate for inflation
+getSymbols("CPIAUCSL", src='FRED') #Consumer Price Index for All Urban Consumers: All Items [1] "CPIAUCSL"
+tail(CPIAUCSL) #look at recent CPI data
+avg.cpi <- apply.yearly(CPIAUCSL, mean)
+cf <- data.frame(CPI = avg.cpi/as.numeric(avg.cpi['2015']), year =1 )   #Use 2015 as base year
+cf$year <- rownames(cf); cf$year <- ymd(cf$year)
+(dat.infl.trans <- data.frame(pay = dat.age$`Average Pay`, year=ymd(paste0(dat.age$`Year of consulting project`, "-12-01")), ind = 1, id = dat.age$`DV ID`))
+data <- merge(cf, dat.infl.trans, all = TRUE, by = "year")  #merge into a single dataset
+data <- data[!is.na(data$ind),]  #remove years not used
+data$pay_adjusted <- data$pay*data$CPIAUCSL  #adjust for inflation
+(data <- data[order(data$id),]) #reorder
+dat.age$pay_2015_dollars <- data$pay_adjusted
+data.frame(dat.age$`Average Pay`,dat.age$pay_2015_dollars, data$year)  #Look at inflation adjustments, 2015 is base year. 
+```
+
+### Imputation of t-statistic
+```{r}
+#Method 1
+#The t-statistic is beta / SE of beta. We have beta and its SE for most cases.
+dat.age[ is.na(dat.age$`t-statistic`) & !is.na(dat.age$`SE of beta`),"t-statistic" ] <- imputation_method1(dat.age)
+
+#Method 2
+#Sometimes we dont have the SE, but we do have a p-value. So work backwards from the p-value and df to the t-statistic.
+dat.age[ is.na(dat.age$`t-statistic`) & !is.na(dat.age$`P-value`) & dat.age$`Exact p-value` == 1, "t-statistic"] <- imputation_method2(dat.age)  
+
+#Method 3
+#We don't have an exact p-value for some cases, having only that it was sig. at the .1, .05, .01, or .001 levels. Following Greenberg et al. (2003) and Stanley and Doucouliagos (2012), we "assume the actual p-value lies at the midpoint of statistical range."
+dat.age[ is.na(dat.age$`t-statistic`) & !is.na(dat.age$`P-value`) & dat.age$`Exact p-value` == 0, "t-statistic"] <- imputation_method3(dat.age)
+```
+
+### Compute partial correlation (yi) and its variance (vi)
+```{r}
+#Following Aloe and Thompson (2013), compute the partial correlation and its variance
+dat.age$yi <- dat.age$`t-statistic` / sqrt (dat.age$`t-statistic`^2 + dat.age$df)
+dat.age$vi <- ((1 - dat.age$yi^2)^2)/ dat.age$df
+
+#With the partial correlation in hand, we need to reverse code the DVs that require it
+dat.age[ dat.age$`DV direction` == 0, "yi"] <- dat.age[ dat.age$`DV direction` == 0, "yi"]*-1
+
+#Write imputed dataset to excel for record
+write.csv(x = dat.age, file = "Data/Imputed Data_age.csv")
+```
+
+# Tenure data prep
+
+### Import and prepare data
+```{r}
+#Import and merge datasets (study-level variables with effect size data)
+dat.tenure <- merge(x= read_excel("Data/Final MA database for BIM projects.xlsx", sheet=4, col_names = TRUE), y = read_excel("Data/Final MA database for BIM projects.xlsx", sheet=2, col_names = TRUE), by = "Client", all = TRUE)
+
+#Reorder observations
+dat.tenure <- dat.tenure[order(dat.tenure$`BIM Case ID.x`),]
+
+#recode indicator variables
+#Specify range of indicator variables... from Tenure squared var to Spans of control var
+x <- 1:dim(dat.tenure)[2]; x <- x[names(dat.tenure) == "Tenure squared"]; x
+y <- 1:dim(dat.tenure)[2]; y <- y[names(dat.tenure) == "Spans of control"]; y
+for(i in x:y) dat.tenure[,i] <- ifelse(dat.tenure[,i]==0,1,0)
+
+#Create new IV type variable for workers and supervisors dichotomusly coded
+dat.tenure$iv_type <- dat.tenure$`IV Type`; dat.tenure$iv_type[dat.tenure$iv_type ==4] <- 3
+table(dat.tenure$iv_type)
+ifelse(dat.tenure$iv_type ==2, dat.tenure$iv_type[dat.tenure$iv_type==2] <- "Supervisee",ifelse(dat.tenure$iv_type ==3, dat.tenure$iv_type[dat.tenure$iv_type==3] <- "Supervisor",0))
+table(dat.tenure$iv_type)
+
+#Adjust wage variable for inflation
+getSymbols("CPIAUCSL", src='FRED') #Consumer Price Index for All Urban Consumers: All Items [1] "CPIAUCSL"
+tail(CPIAUCSL) #look at recent CPI data
+avg.cpi <- apply.yearly(CPIAUCSL, mean)
+cf <- data.frame(CPI = avg.cpi/as.numeric(avg.cpi['2015']), year =1 )   #Use 2015 as base year
+cf$year <- rownames(cf); cf$year <- ymd(cf$year)
+(dat.infl.trans <- data.frame(pay = dat.tenure$`Average Pay`, year=ymd(paste0(dat.tenure$`Year of consulting project`, "-12-01")), ind = 1, id = dat.tenure$`DV ID`))
+data <- merge(cf, dat.infl.trans, all = TRUE, by = "year")  #merge into a single dataset
+data <- data[!is.na(data$ind),]  #remove years not used
+data$pay_adjusted <- data$pay*data$CPIAUCSL  #adjust for inflation
+(data <- data[order(data$id),]) #reorder
+dat.tenure$pay_2015_dollars <- data$pay_adjusted
+data.frame(dat.tenure$`Average Pay`,dat.tenure$pay_2015_dollars, data$year)  #Look at inflation adjustments, 2015 is base year. 
+```
+
+### Imputation
+```{r}
+#Method 1
+#The t-statistic is beta / SE of beta. We have beta and its SE for most cases.
+dat.tenure[ is.na(dat.tenure$`t-statistic`) & !is.na(dat.tenure$`SE of beta`),"t-statistic" ] <- imputation_method1(dat.tenure)
+
+#Method 2
+#Sometimes we dont have the SE, but we do have a p-value. So work backwards from the p-value and df to the t-statistic.
+dat.tenure[ is.na(dat.tenure$`t-statistic`) & !is.na(dat.tenure$`P-value`) & dat.tenure$`Exact p-value` == 1, "t-statistic"] <- imputation_method2(dat.tenure)  
+
+#Method 3
+#We don't have an exact p-value for some cases, having only that it was sig. at the .1, .05, .01, or .001 levels. Following Greenberg et al. (2003) and Stanley and Doucouliagos (2012), we "assume the actual p-value lies at the midpoint of statistical range."
+dat.tenure[ is.na(dat.tenure$`t-statistic`) & !is.na(dat.tenure$`P-value`) & dat.tenure$`Exact p-value` == 0, "t-statistic"] <- imputation_method3(dat.tenure)
+```
+
+### Compute partial correlation (yi) and its variance (vi)
+```{r}
+#Following Aloe and Thompson (2013), compute the partial correlation and its variance
+dat.tenure$yi <- dat.tenure$`t-statistic` / sqrt (dat.tenure$`t-statistic`^2 + dat.tenure$df)
+dat.tenure$vi <- ((1 - dat.tenure$yi^2)^2)/ dat.tenure$df
+
+#With the partial correlation in hand, we need to reverse code the DVs that require it
+dat.tenure[ dat.tenure$`DV direction` == 0, "yi"] <- dat.tenure[ dat.tenure$`DV direction` == 0, "yi"]*-1
+
+#Write imputed dataset to excel for record
+write.csv(x = dat.tenure, file = "Data/Imputed Data_tenure.csv")
+```
